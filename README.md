@@ -1,98 +1,219 @@
-<p align="center">
-<img src="https://raw.githubusercontent.com/MetaCubeX/mihomo/Meta/docs/logo.png" width="120" alt="Mihomo Logo">
-</p>
+# Prizrak-Core в Docker и на роутере
 
-<h3 align="center">
-A high-performance, multi-protocol Mihomo (Clash Meta) proxy client in Docker, optimized for MikroTik RouterOS v7.
-</h3>
+Форк [mihomo-mikrotik](https://github.com/wiktorbgu/mihomo-mikrotik), переведённый на [Prizrak-Core](https://github.com/legiz-ru/Prizrak-Core). Контейнер собирает ядро из исходников и сохраняет формат конфигурации mihomo, переменные подписок и каталог `/etc/mihomo`.
 
-<p align="center">
-Высокопроизводительный многопротокольный прокси-клиент Mihomo (Clash Meta) в Docker-контейнере, специально оптимизированный для MikroTik RouterOS v7.
-</p>
+Prizrak-Core добавляет к mihomo возможности Xray: XHTTP, REALITY с ML-DSA-65, mux.cool, finalmask и mKCP для VLESS. Также доступны протоколы ядра, включая VLESS, Trojan, Hysteria2, TUIC, Shadowsocks и WireGuard. Параметры конкретного сервера должны поддерживаться выбранной версией ядра; см. [официальную документацию](https://core.prizrak.app/ru/).
 
-<p align="center">
-<a href="https://hub.docker.com/r/wiktorbgu/mihomo-mikrotik">
-<img src="https://img.shields.io/docker/pulls/wiktorbgu/mihomo-mikrotik?style=flat-square&logo=docker&logoColor=white" alt="Docker Pulls">
-</a>
-<a href="https://hub.docker.com/r/wiktorbgu/mihomo-mikrotik">
-<img src="https://img.shields.io/docker/stars/wiktorbgu/mihomo-mikrotik?style=flat-square&logo=docker&logoColor=white" alt="Docker Stars">
-</a>
-<a href="https://github.com/wiktorbgu/mihomo-mikrotik">
-<img src="https://img.shields.io/github/stars/wiktorbgu/mihomo-mikrotik?style=flat-square&logo=github" alt="GitHub Stars">
-</a>
-<a href="https://t.me/it_network_people">
-<img src="https://img.shields.io/badge/Telegram-Community-purple?style=flat-square&logo=telegram&logoColor=white" alt="Telegram Community">
-</a>
-<a href="https://telegra.ph/Youre-making-the-world-a-better-place-11-24">
-<img src="https://img.shields.io/badge/Donate-Support%20the%20Developer-green?style=flat-square&logo=heart&logoColor=white" alt="Donate">
-</a>
-</p>
+Версия проекта — **0.1.0**, она записана в `VERSION`. По умолчанию образ собирает чистый тег ядра Prizrak-Core **v1.19.34-r2** без локальных патчей. Версия проекта и версия ядра задаются независимо.
 
-### 📚 Documentation
+## Быстрый запуск на домашнем сервере
 
-<p>
-  <a href="https://hub.docker.com/r/wiktorbgu/mihomo-mikrotik">
-    <img src="https://img.shields.io/badge/Docker%20Hub-Image%20%26%20Usage-2496ED?style=for-the-badge&logo=docker&logoColor=white" alt="Docker Hub">
-  </a>
-</p>
+Выберите один способ запуска для экземпляра: Docker Compose ниже или `docker run` в следующем разделе.
 
-<p>
-  <a href="https://github.com/wiktorbgu/mihomo-mikrotik/wiki">
-    <img src="https://img.shields.io/badge/GitHub-Wiki-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Wiki">
-  </a>
-</p>
+Нужны Linux и Docker Engine с поддержкой BuildKit. Для этого сценария также нужен Docker Compose.
 
-## 🐳 Варианты сборок Docker
-> 💾 Размер на диске указан для платформы arm64.  
+```bash
+cp .env.example .env
+```
 
-| Сборка | Размер на диске | Сэкономлено | Docker tag | Описание |
-|:---|---:|:---|:---|:---|
-| 👀 Standard | **64 МБ** | **- 9.3 МБ** | `latest` | Рекомендуется большинству пользователей |
-| 🌚 gVisor | **73,3 МБ** | | `gvisor` | Поддержка gVisor |
-| 🔥 UPX | **28,3 МБ** | **- 45 МБ** | `upx` | Уменьшенный размер благодаря UPX |
-| 🔥 UPX + gVisor | **29,5 МБ** | **- 43.8 МБ** | `upx-gvisor` | UPX-сжатие и поддержка gVisor |
+Задайте свой `UI_SECRET` в `.env` и добавьте `SUB1` с HTTP(S)-URL подписки либо `SRV1` со ссылкой узла. Затем:
 
-### Какой вариант выбрать?
+```bash
+docker compose up --build -d
+docker compose logs -f prizrak
+```
 
-- **Standard (`latest`)** — оптимальный выбор для большинства пользователей.
-- **gVisor** — если нужна поддержка gVisor, в частности для исходящего Tailscale.
-- **UPX** — если важно минимизировать занимаемое место.
-- **UPX + gVisor** — если нужны обе возможности одновременно.
+Данные сохраняются в `./data`. Без подписок и узлов используется `DIRECT`: контейнер запускается, но трафик идёт напрямую.
 
-**Рекомендация:** выбирайте Standard (latest), если у устройства мало RAM, важна предсказуемая производительность или вы запускаете несколько экземпляров.  
-UPX имеет смысл использовать, когда уменьшение размера образа и экономия места на диске важнее возможных затрат памяти и CPU.  
-Сравнивайте потребление ресурсов на целевом устройстве под вашей 
-обычной нагрузкой.  
-**Зачем нужен gVisor?**
-На данный момент он нужен прежде всего для исходящего Tailscale. В самом Mihomo теперь используется собственный IP stack `mips` по умолчанию, поэтому большинству пользователей отдельная сборка с 
-gVisor не требуется.
+| Сервис | Адрес на сервере |
+| --- | --- |
+| HTTP / SOCKS5 | `127.0.0.1:1080` TCP и UDP |
+| API управления | `127.0.0.1:9090` TCP |
+| DNS внутри контейнера | `0.0.0.0:1053`, наружу не опубликован |
 
-> [!NOTE]
-> **ARMv5:** UPX-сжатие не применяется, бинарники остаются без сжатия.
+Веб-панель в образ не включена: при первом запуске ядро скачивает MetaCubeXD в `./data/ui` и отдаёт её по адресу `http://127.0.0.1:9090/ui/`. Для загрузки нужен доступ к GitHub. Можно задать `EXTERNAL_UI_URL` с архивом другой совместимой панели либо подключить клиент к API с `UI_SECRET`. В стандартном Compose порты доступны только с самого сервера. Для устройств LAN адрес публикации и правила firewall задаются отдельно.
 
+Проверка HTTP-прокси:
 
-## 🐳 Docker Build Variants
-> 💾 Disk size is measured on the arm64 platform.
+```bash
+curl --proxy http://127.0.0.1:1080 https://example.org/
+```
 
-| Build | Disk Usage | Size Reduction | Docker Tag | Description |
-|:---|---:|:---|:---|:---|
-| 👀 Standard | **64 MB** | **- 9.3 MB** | `latest` | Recommended for most users |
-| 🌚 gVisor | **73.3 MB** | | `gvisor` | gVisor support |
-| 🔥 UPX | **28.3 MB** | **- 45 MB** | `upx` | Reduced size with UPX |
-| 🔥 UPX + gVisor | **29.5 MB** | **- 43.8 MB** | `upx-gvisor` | UPX compression with gVisor support |
+Обычный режим не требует `NET_ADMIN` и `/dev/net/tun`; стартовый скрипт не меняет NAT и policy routing. Проксирование применяется к приложениям, в которых указан этот прокси.
 
-### Which variant should I choose?
+## Docker run без Compose
 
-- **Standard (`latest`)** — recommended for most users.
-- **gVisor** — if you need gVisor support, especially for outbound Tailscale.
-- **UPX** — if minimizing disk usage is important.
-- **UPX + gVisor** — if you need both features.
+Соберите образ с фиксированной версией ядра и подготовьте окружение:
 
-**Recommendation:** Choose Standard (latest) if the device has limited RAM, predictable performance is important, or you run multiple instances.
-UPX makes sense when reducing image size and saving disk space are more important than the potential memory and CPU overhead.
-Compare resource consumption on the target device under your typical workload.  
-**Why is gVisor needed?**
-Currently, its primary purpose is to support outbound Tailscale traffic. Mihomo itself now uses its own `mips` IP stack by default, so most users do not need a separate build with gVisor.
+```bash
+docker build --build-arg PRIZRAK_VERSION=v1.19.34-r2 \
+  -t mihomo-prizrak-docker:local .
+cp .env.example .env
+mkdir -p data
+```
 
-> [!NOTE]
-> **ARMv5:** UPX compression is disabled. Binaries remain uncompressed.
+Замените `UI_SECRET` и добавьте свою подписку в `SUB1` внутри `.env`. Затем запустите контейнер:
+
+```bash
+docker run -d --name prizrak --restart unless-stopped \
+  --env-file .env \
+  -p 127.0.0.1:1080:1080/tcp \
+  -p 127.0.0.1:1080:1080/udp \
+  -p 127.0.0.1:9090:9090/tcp \
+  --mount type=bind,source="$(pwd)/data",target=/etc/mihomo \
+  mihomo-prizrak-docker:local
+docker logs -f prizrak
+```
+
+Прокси и панель доступны по тем же адресам, что и в Compose. `Ctrl+C` завершает просмотр логов; остановка и удаление контейнера выполняются отдельно:
+
+```bash
+docker stop prizrak
+docker rm prizrak
+```
+
+Данные остаются в `./data`. После изменения `.env` пересоздайте контейнер той же командой `docker run`. Параметры сборки для этого сценария передаются через `docker build --build-arg`; переменные в `--env-file` применяются при запуске.
+
+## Режимы сети
+
+| `NETWORK_MODE` | Назначение |
+| --- | --- |
+| `proxy` | Режим по умолчанию: HTTP/SOCKS без автоматического перехвата трафика |
+| `tun` | TUN с маршрутизацией средствами ядра; нужны `/dev/net/tun` и `NET_ADMIN` |
+| `tproxy` | Прозрачный прокси через nftables и policy routing; трафик должен поступать на выбранный интерфейс |
+| `mikrotik` | Подготовка сети RouterOS: NAT, исправление policy rules, multi-VETH и выбор TPROXY/TUN по доступности nftables |
+
+`compose.yaml` явно выбирает `proxy`. Отдельный файл `compose.tun.yaml` выбирает `tun`, использует сеть хоста и оставляет HTTP/SOCKS, API и DNS на loopback. Он меняет маршрутизацию **самого Linux-сервера** при включённом `TUN_AUTO_ROUTE=true`.
+
+Переключение на TUN после настройки подписки:
+
+```bash
+docker compose down
+docker compose -f compose.tun.yaml up --build -d
+docker compose -f compose.tun.yaml logs -f prizrak
+```
+
+Используйте `compose.tun.yaml` самостоятельно, без объединения с `compose.yaml`. Для возврата остановите его через `docker compose -f compose.tun.yaml down` и запустите обычный Compose.
+
+TUN сервера сам по себе не делает его шлюзом для LAN. Для перехвата трафика других устройств требуются настройки шлюза, forwarding и firewall. В `tproxy` доступны `TPROXY_INTERFACE` и `TPROXY_PORT` (по умолчанию `15123`); этот режим требует nftables и `NET_ADMIN`. `TUN_AUTO_REDIRECT` по умолчанию выключен.
+
+## Подписки и собственные конфигурации
+
+В `.env` можно задать несколько `SUB1`, `SUB2`, … с обычными HTTP(S)-URL подписок и `SRV1`, `SRV2`, … с поддерживаемыми ядром URI узлов. HTTP(S)-URL в `SRVn` тоже обрабатываются как подписки. Содержимое подписок в форматах URI, YAML и Xray JSON разбирает само ядро. Для специфичных параметров Prizrak-Core используйте YAML: преобразователь ссылок провайдера должен уметь передавать эти параметры.
+
+Каталог `./data` соответствует `/etc/mihomo`:
+
+| Путь | Назначение |
+| --- | --- |
+| `default_config.yaml` | Сгенерированная конфигурация; ручные изменения перезаписываются |
+| `template/default_config.yaml` | Поставляемый шаблон, обновляется из образа с резервной копией `default_config_old.yaml` |
+| `config.yaml` | Готовая собственная конфигурация при `CONFIG=config.yaml`; без `envsubst` |
+| `template/custom.yaml` | Собственный шаблон с переменными окружения при `CONFIG=custom.yaml` |
+| `awg/*.conf` | Конфигурации WireGuard / AmneziaWG, преобразуемые в провайдер |
+| `user_sh/*.sh` | Пользовательские скрипты, выполняемые при обычном старте |
+| `.hwid` | Постоянный идентификатор для подписок с привязкой к устройству |
+
+Чтобы изменить правила маршрутизации или группы, используйте собственный конфиг либо собственный шаблон. В готовом YAML вы сами задаёте listeners, DNS, API и секрет: переменные стандартного шаблона его не изменяют.
+
+Полезные настройки стандартного шаблона: `LOG_LEVEL`, `IPV6`, `DNS`, `DNS_BOOTSTRAP`, `DNS_LISTEN`, `MIXED_PORT`, `UI_PORT`, `UI_SECRET`. Несколько DNS-серверов разделяются `|`. У провайдеров есть общий и индивидуальный `PROVIDER_HEADER`, `PROVIDER_FILTER`, `PROVIDER_EXCLUDE_FILTER`; индивидуальные имена заканчиваются, например, на `_SUB1`.
+
+Проверка конфигурации без запуска перехвата:
+
+```bash
+docker compose run --rm prizrak --render-config
+docker compose run --rm prizrak -t -d /etc/mihomo -f /etc/mihomo/default_config.yaml
+```
+
+`--render-config` создаёт конфигурацию без изменения сети и выполнения `user_sh`. Аргументы ядра, включая `-v`, `-h` и `-t`, передаются напрямую; при таком запуске генерации конфигурации нет.
+
+## Сборки и архитектуры
+
+Для самостоятельной сборки доступны варианты:
+
+| Вариант | `WITH_GVISOR` | `UPX` |
+| --- | --- | --- |
+| Standard | `0` | `0` |
+| gVisor | `1` | `0` |
+| UPX | `0` | `1` |
+| UPX + gVisor | `1` | `1` |
+
+CI публикует Standard. У опубликованного образа только тег версии проекта и `latest`; остальные варианты собираются локально через build args.
+
+Standard подходит для начала. gVisor нужен функциям, требующим этого build tag. UPX уменьшает размер бинарников; на ARMv5 сжатие отключено. Размер и потребление памяти следует измерять на целевом устройстве.
+
+Цели образа: `linux/amd64`, `linux/arm64`, `linux/arm/v7`, `linux/arm/v5`. MIPS-образа нет. На ARMv5 используется Debian, на остальных архитектурах — Alpine.
+
+Параметры сборки можно изменить в `.env`, затем повторить `docker compose up --build -d`. Для отдельного образа:
+
+```bash
+docker buildx build --load --platform linux/amd64 \
+  --build-arg PRIZRAK_VERSION=v1.19.34-r2 \
+  --build-arg WITH_GVISOR=0 --build-arg UPX=0 \
+  -t mihomo-prizrak-docker:local .
+```
+
+`PRIZRAK_VERSION` фиксирует чистый тег исходников Prizrak-Core. `APP_VERSION` задаёт версию проекта в OCI-метаданных образа; при публикации CI берёт её из `VERSION` и проверяет совпадение с Git-тегом. Версия ядра и его исходный commit записаны в `/usr/share/prizrak-core/build-info`. Имя `mihomo` оставлено как ссылка на `prizrak-core`.
+
+## MikroTik RouterOS
+
+Нужна модель и версия RouterOS с поддержкой контейнеров, установленный пакет `container` и включённая функция контейнеров. Проверьте архитектуру и доступную RAM; для образа, распаковки и данных используйте внешний накопитель. Подготовка описана в [руководстве MikroTik](https://manual.mikrotik.com/docs/containers/).
+
+Сначала создайте VETH с доступом в интернет и настройте маршрутизацию LAN к нему. Пример ниже предполагает уже настроенный `veth-prizrak` и накопитель `disk1`; он не настраивает LAN, DNS клиентов и firewall.
+
+До первой успешной публикации CI соберите архив на Linux для архитектуры роутера:
+
+```bash
+docker buildx build --platform linux/arm64 \
+  --build-arg PRIZRAK_VERSION=v1.19.34-r2 \
+  --output type=docker,dest=prizrak-arm64.tar .
+```
+
+Загрузите архив на накопитель роутера как `disk1/prizrak-arm64.tar`. Для другой архитектуры измените `--platform` и имя файла.
+
+Пример для актуального CLI RouterOS:
+
+```routeros
+/container/envs/add list=prizrak key=NETWORK_MODE value=mikrotik
+/container/envs/add list=prizrak key=UI_SECRET value="YOUR_SECRET"
+/container/envs/add list=prizrak key=SUB1 value="YOUR_SUBSCRIPTION_URL"
+/container/envs/add list=prizrak key=DNS_LISTEN value="0.0.0.0:53"
+/container/mounts/add list=prizrak-data src=disk1/prizrak-data dst=/etc/mihomo
+/container/add file=disk1/prizrak-arm64.tar interface=veth-prizrak root-dir=disk1/prizrak-root mountlists=prizrak-data envlists=prizrak name=prizrak logging=yes start-on-boot=yes
+/container/print
+```
+
+Дождитесь окончания распаковки и состояния `stopped`, затем выполните `/container/start prizrak`. Имена `envlists` / `mountlists` зависят от версии RouterOS; в старых версиях используются `envlist` / `mounts`. Проверьте параметры своей версии через `?` и [CLI reference](https://manual.mikrotik.com/docs/cli-reference/container/).
+
+Прозрачному режиму нужны доступные ядру контейнера сетевые операции и TUN либо nftables. Их доступность зависит от RouterOS и модели. При `IPTABLES=1` режим MikroTik принудительно выбирает TUN. DNS-порт `53` в примере нужен, если RouterOS направляет DNS в контейнер; стандартный Docker-образ слушает `1053`. Закройте API и прокси от WAN правилами роутера.
+
+После успешной публикации тега `0.1.0` образ будет доступен как `ghcr.io/vrbeeshop/mihomo-prizrak-docker:0.1.0` и `ghcr.io/vrbeeshop/mihomo-prizrak-docker:latest`. Для загрузки с роутера настройте registry `https://ghcr.io` и используйте `remote-image=vrbeeshop/mihomo-prizrak-docker:latest` вместо `file=...`; пакет GHCR должен быть публичным либо нужны учётные данные registry. До публикации используйте архив или собственный registry.
+
+На OpenWrt с Docker применим контейнерный вариант при наличии нужных ресурсов и модулей ядра. Установка Prizrak-Core непосредственно в OpenWrt без Docker — отдельный способ развёртывания, в этот репозиторий не входит.
+
+## Проверки и публикация
+
+```bash
+bash scripts/smoke-test.sh mihomo-prizrak-docker:local
+```
+
+Скрипт проверяет контейнер и конфигурации без изменения сети хоста. Проверка конфигурации не подтверждает соединение с конкретным сервером. Полный TUN/TPROXY, производительность и работа на модели MikroTik требуют проверки на целевом устройстве.
+
+Для `v1.19.34-r2` локально прошли проверки amd64-образов Standard и gVisor + UPX: запуск без сетевых привилегий, HTTP/SOCKS-запросы, загрузка VLESS/XHTTP и Hysteria2 из URI, конфигурации всех сетевых режимов. Кросс-компиляция ядра прошла для ARM64, ARMv7 и ARMv5; запуск ARM-контейнеров на устройстве ещё не проверен.
+
+GitHub Actions на обычные push в любые ветки и на PR запускает проверки, включая локальную сборку amd64 и smoke-тесты. Публикации образа при этих событиях нет.
+
+Публикация в GHCR запускается только при push числового Git-тега формата `MAJOR.MINOR.PATCH`, например `0.1.0`. Тег должен совпадать с содержимым `VERSION`. После успешных проверок CI собирает Standard для `linux/amd64`, `linux/arm64`, `linux/arm/v7` и `linux/arm/v5` и публикует два тега:
+
+- `ghcr.io/<владелец>/<репозиторий>:0.1.0` — версия проекта;
+- `ghcr.io/<владелец>/<репозиторий>:latest` — последний опубликованный релиз.
+
+Теги с хешами коммитов не создаются. Для входа в GHCR используется `GITHUB_TOKEN`; Docker Hub и отдельный registry token не требуются.
+
+Для первого релиза сначала включите проверенные изменения и файл `VERSION` со значением `0.1.0` в коммит и отправьте ветку в GitHub. Затем создайте тег на этом коммите:
+
+```bash
+git tag 0.1.0
+git push origin 0.1.0
+```
+
+Для следующего релиза обновите `VERSION`, закоммитьте изменения и отправьте соответствующий числовой тег. Обновление `PRIZRAK_VERSION` само по себе релиз не запускает.
