@@ -1,10 +1,9 @@
 services:
   prizrak:
-    image: mihomo-prizrak-docker:local
+    image: ${PRIZRAK_IMAGE:-ghcr.io/vrbeeshop/mihomo-prizrak-docker:latest}
     build:
       context: .
       args:
-        PRIZRAK_VERSION: ${PRIZRAK_VERSION:-v1.19.34-r2}
         WITH_GVISOR: ${WITH_GVISOR:-0}
         UPX: ${UPX:-0}
     restart: unless-stopped
@@ -15,8 +14,8 @@ services:
       MIXED_BIND_ADDRESS: 0.0.0.0
       EXTERNAL_CONTROLLER_ADDRESS: 0.0.0.0
     ports:
-      - "127.0.0.1:${MIXED_PORT:-1080}:${MIXED_PORT:-1080}/tcp"
-      - "127.0.0.1:${MIXED_PORT:-1080}:${MIXED_PORT:-1080}/udp"
+      - "127.0.0.1:${MIXED_PORT:-20170}:${MIXED_PORT:-20170}/tcp"
+      - "127.0.0.1:${MIXED_PORT:-20170}:${MIXED_PORT:-20170}/udp"
       - "127.0.0.1:${UI_PORT:-9090}:${UI_PORT:-9090}/tcp"
     volumes:
       - ./data:/etc/mihomo

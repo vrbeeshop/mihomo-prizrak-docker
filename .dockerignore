@@ -9,5 +9,6 @@ data
 *.tar.gz
 *.log
 README.md
+AGENTS.md
 compose*.yaml
 scripts

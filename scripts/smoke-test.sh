@@ -30,7 +30,7 @@ docker run --rm --network none --cap-drop ALL \
     done
     [ "$ready" = 1 ] || { cat /tmp/prizrak.log; exit 1; }
     cat /tmp/version.json
-    for proxy in http://127.0.0.1:1080 socks5h://127.0.0.1:1080; do
+    for proxy in http://127.0.0.1:20170 socks5h://127.0.0.1:20170; do
       curl -fsS --max-time 5 --noproxy "" --proxy "$proxy" \
         -H "Authorization: Bearer $UI_SECRET" http://127.0.0.1:9090/version
     done
@@ -76,7 +76,7 @@ docker run --rm --network none --cap-drop ALL \
 # A user config and CLI arguments containing spaces must reach the core intact.
 docker run --rm --network none --cap-drop ALL --entrypoint bash "$IMAGE" -euc '
   mkdir -p "/tmp/custom config"
-  printf "mixed-port: 1080\nrules:\n  - MATCH,DIRECT\n" > "/tmp/custom config/config.yaml"
+  printf "mixed-port: 20170\nrules:\n  - MATCH,DIRECT\n" > "/tmp/custom config/config.yaml"
   /entrypoint.sh -t -d "/tmp/custom config" -f "/tmp/custom config/config.yaml"
   export CONFIG=custom.yaml
   cp "/tmp/custom config/config.yaml" "$WORKDIR/$CONFIG"
