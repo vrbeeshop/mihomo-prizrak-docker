@@ -84,7 +84,7 @@ jobs:
 
       - name: Check shell syntax
         run: |
-          for script in entrypoint.sh scripts/*.sh; do
+          for script in entrypoint.sh runtime/*.sh scripts/*.sh; do
             bash -n "$script"
           done
 
@@ -110,6 +110,9 @@ jobs:
 
       - name: Test runtime and generated configurations
         run: bash scripts/smoke-test.sh prizrak-core:test
+
+      - name: Test subscription configuration modes and refresh
+        run: bash scripts/test-subscriptions.sh prizrak-core:test
 
   publish:
     name: Publish version and latest to GHCR
