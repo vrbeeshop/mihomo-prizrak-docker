@@ -87,6 +87,7 @@ $PROVIDERS_LIST
 listeners:
   - name: mixed-in
     type: mixed
+    listen: $MIXED_BIND_ADDRESS
     port: $MIXED_PORT
 $TUN_IN_AUTOCONFIG
 

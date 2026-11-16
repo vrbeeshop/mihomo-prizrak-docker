@@ -1,159 +1,92 @@
 # syntax=docker/dockerfile:1
-FROM --platform=$BUILDPLATFORM alpine AS prebuild
+# Build on the builder's CPU; the Go binary is cross-compiled for the target.
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+RUN apk add --no-cache ca-certificates git upx
 
-WORKDIR /src
-COPY patches/ /tmp/
-
-ARG MIHOMO_VERSION
-
-# инструменты для сборки
-RUN apk add --no-cache git go bash curl jq gzip tar unzip ca-certificates make upx
-
-# Используем переданную версию или автоматически определяем последний stable-релиз
-RUN BUILDTIME=$(date -u '+%a %b %d %H:%M:%S UTC %Y') && \
-    if [ -n "$MIHOMO_VERSION" ]; then \
-        TAG="$MIHOMO_VERSION"; \
-    else \
-        JSON="$(curl -fsSL --retry 3 --retry-delay 2 https://api.github.com/repos/MetaCubeX/mihomo/releases/latest)" && \
-        TAG="$(echo "$JSON" | jq -er .tag_name)"; \
-    fi && \
-    test -n "$TAG" && \
-    git clone --depth=1 --branch "$TAG" --single-branch https://github.com/MetaCubeX/mihomo.git /src && \
-    echo "Updating version.go with TAG=${TAG} and BUILDTIME=${BUILDTIME}" && \
-    sed -i "s|Version\s*=.*|Version = \"${TAG}\"|" constant/version.go && \
-    sed -i "s|BuildTime\s*=.*|BuildTime = \"${BUILDTIME}\"|" constant/version.go
-
-RUN set -eux; \
-    PATCH=/tmp/mihomo-skip-invalid-proxies.patch; \
-    git apply --check "$PATCH"; \
-    git apply "$PATCH"; \
-    grep -Fq 'skip invalid proxy' adapter/provider/provider.go; \
-    grep -Fq 'usable proxy (skipped' adapter/provider/provider.go; \
-    git diff --check; \
-    echo "Invalid proxy skip patch applied and verified"
-
-RUN set -eux; \
-    PATCH=/tmp/mihomo-happ-v2raytun-subscription-support.patch; \
-    git apply --check "$PATCH"; \
-    git apply "$PATCH"; \
-    grep -Fq 'hpwnrFallback' component/resource/vehicle.go; \
-    grep -Fq 'Fallback(error)' component/resource/fetcher.go; \
-    git diff --check; \
-    echo "HPWNR patch applied and verified"
-
-# origin https://github.com/MetaCubeX/mihomo/pull/3326.patch
-RUN set -eux; \
-    PATCH=/tmp/mihomo-reality-x25519mlkem768-clienthello.patch; \
-    git apply --check "$PATCH"; \
-    git apply "$PATCH"; \
-    grep -Fq 'BuildAddedX25519MLKEM768HandshakeState' component/tls/utls.go; \
-    echo "Reality X25519MLKEM768 patch applied and verified"
-
-RUN set -eu; \
-    sed -i \
-        -e 's/hello\.SessionId\[0\] = 1/hello.SessionId[0] = 26/' \
-        -e 's/hello\.SessionId\[1\] = 8/hello.SessionId[1] = 3/' \
-        -e 's/hello\.SessionId\[2\] = 2/hello.SessionId[2] = 27/' \
-        component/tls/reality.go; \
-    grep -Fq 'hello.SessionId[0] = 26' component/tls/reality.go; \
-    grep -Fq 'hello.SessionId[1] = 3' component/tls/reality.go; \
-    grep -Fq 'hello.SessionId[2] = 27' component/tls/reality.go; \
-    echo "Reality minClientVer patch applied and verified"
-  
-
-FROM --platform=$BUILDPLATFORM prebuild AS build
-ARG TARGETPLATFORM \
-    TARGETARCH \
-    TARGETOS \
-    TARGETVARIANT
-
-# сборка mihomo с исправлениями
+ARG PRIZRAK_VERSION=v1.19.34-r2
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
 ARG WITH_GVISOR=0
-
+ARG UPX=0
 WORKDIR /src
+
+RUN test -n "$PRIZRAK_VERSION" && \
+    git clone --depth=1 --branch="$PRIZRAK_VERSION" --single-branch \
+        https://github.com/legiz-ru/Prizrak-Core.git .
 
 ENV GOCACHE=/var/cache/go-build \
     GOMODCACHE=/go/pkg/mod \
-    GOTMPDIR=/var/tmp/go-tmp \
-    GOFLAGS="-modcacherw"
-
-# Сборка mihomo для целевой архитектуры
-RUN --mount=type=cache,id=mihomo-go-mod,target=/go/pkg/mod \
-    --mount=type=cache,id=mihomo-go-build,target=/var/cache/go-build \
-    mkdir -p "$GOTMPDIR" && \
-    echo "Building for $TARGETARCH $TARGETVARIANT" && \
-    BUILD_TAGS="" && \
-    if [ "$WITH_GVISOR" = "1" ]; then BUILD_TAGS="with_gvisor"; fi && \
-    echo "Build tags: $BUILD_TAGS" && \
-    if [ "$TARGETARCH" = "arm" ]; then \
-        export GOARCH=arm; \
-        if [ "$TARGETVARIANT" = "v5" ]; then export GOARM=5; \
-        elif [ "$TARGETVARIANT" = "v7" ]; then export GOARM=7; fi; \
-    else \
-        export GOARCH=$TARGETARCH; \
-    fi && \
-    export GOOS=$TARGETOS && CGO_ENABLED=0 go build -v -tags "$BUILD_TAGS" -trimpath -ldflags "-w -s -buildid=" -o /src/mihomo .
-
-WORKDIR /tmp
-
-#make work structure
-RUN mkdir -p build/usr/bin build/etc && \
-    mv /src/mihomo build/usr/bin/mihomo
-
-COPY entrypoint.sh build/
-COPY mihomo-fs build/
-
-RUN set -eux; \
-    case "$TARGETARCH-$TARGETVARIANT" in \
-        amd64-*) HPWNR_ASSET="hpwnr-linux-x86_64" ;; \
-        arm64-*) HPWNR_ASSET="hpwnr-linux-arm64" ;; \
-        arm-v7) HPWNR_ASSET="hpwnr-linux-armv7" ;; \
-        arm-v5) HPWNR_ASSET="hpwnr-linux-armv5" ;; \
-        *) HPWNR_ASSET="" ;; \
+    CGO_ENABLED=0
+RUN --mount=type=cache,id=prizrak-go-mod,target=/go/pkg/mod \
+    --mount=type=cache,id=prizrak-go-build,target=/var/cache/go-build \
+    set -eu; \
+    case "$TARGETOS/$TARGETARCH/$TARGETVARIANT" in \
+        linux/amd64/*) export GOAMD64=v1 ;; \
+        linux/arm64/*) ;; \
+        linux/arm/v7) export GOARM=7 ;; \
+        linux/arm/v5) export GOARM=5 ;; \
+        *) echo "Unsupported target: $TARGETOS/$TARGETARCH/$TARGETVARIANT" >&2; exit 1 ;; \
     esac; \
-    if [ -n "$HPWNR_ASSET" ]; then \
-        curl -fL --retry 3 "https://github.com/wiktorbgu/hpwnr/releases/latest/download/$HPWNR_ASSET" -o /tmp/build/usr/bin/hpwnr; \
-        chmod 0755 /tmp/build/usr/bin/hpwnr; \
+    BUILD_TAGS=""; \
+    case "$WITH_GVISOR" in 0) ;; 1) BUILD_TAGS="with_gvisor" ;; *) exit 1 ;; esac; \
+    BUILDTIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; \
+    GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -tags "$BUILD_TAGS" -trimpath \
+        -ldflags "-w -s -buildid= -X github.com/metacubex/mihomo/constant.Version=$PRIZRAK_VERSION -X github.com/metacubex/mihomo/constant.BuildTime=$BUILDTIME" \
+        -o /out/usr/bin/prizrak-core .; \
+    mkdir -p /out/usr/share/prizrak-core; \
+    printf 'version=%s\ncommit=%s\nwith_gvisor=%s\n' \
+        "$PRIZRAK_VERSION" "$(git rev-parse HEAD)" "$WITH_GVISOR" \
+        > /out/usr/share/prizrak-core/build-info
+
+RUN set -eu; \
+    UPX_ENABLED="$UPX"; unset UPX; \
+    case "$UPX_ENABLED" in 0|1) ;; *) exit 1 ;; esac; \
+    if [ "$UPX_ENABLED" = 1 ] && [ "$TARGETARCH/$TARGETVARIANT" != arm/v5 ]; then \
+        upx --best --lzma /out/usr/bin/prizrak-core; \
+        upx -t /out/usr/bin/prizrak-core; \
     fi
 
-ARG UPX=0
+FROM alpine:3.23 AS linux-amd64
+FROM alpine:3.23 AS linux-arm64
+FROM alpine:3.23 AS linux-armv7
+# Alpine does not support ARMv5; use a glibc runtime for those routers.
+FROM debian:trixie-slim AS linux-armv5
+FROM linux-${TARGETARCH}${TARGETVARIANT} AS runtime
+ARG TARGETARCH
+ARG TARGETVARIANT
+ARG APP_VERSION=0.1.0
+LABEL org.opencontainers.image.title="Prizrak-Core Docker" \
+      org.opencontainers.image.source="https://github.com/vrbeeshop/mihomo-prizrak-docker" \
+      org.opencontainers.image.version="$APP_VERSION"
 
-# Сжимаем готовые ELF-бинарники UPX, кроме armv5
-RUN set -eux; \
-    UPX_ENABLED="$UPX"; \
-    unset UPX; \
-    if [ "$UPX_ENABLED" = "1" ] && { [ "$TARGETARCH" != "arm" ] || [ "$TARGETVARIANT" != "v5" ]; }; then \
-        for BIN in /tmp/build/usr/bin/mihomo /tmp/build/usr/bin/hpwnr; do \
-            if [ -f "$BIN" ]; then \
-                echo "=== Before UPX: $BIN ==="; \
-                ls -lh "$BIN"; \
-                upx --best --lzma "$BIN"; \
-                upx -t "$BIN"; \
-                echo "=== After UPX: $BIN ==="; \
-                ls -lh "$BIN"; \
-            fi; \
-        done; \
+RUN set -eu; \
+    if [ "$TARGETARCH/$TARGETVARIANT" = arm/v5 ]; then \
+        apt-get update; \
+        apt-get install -y --no-install-recommends bash ca-certificates gettext-base \
+            iproute2 iptables nftables kmod tini tzdata curl; \
+        update-alternatives --set iptables /usr/sbin/iptables-legacy; \
+        update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy; \
+        rm -rf /var/lib/apt/lists/*; \
     else \
-        echo "UPX compression disabled (UPX=$UPX_ENABLED)"; \
+        apk add --no-cache bash ca-certificates envsubst iproute2 iptables \
+            iptables-legacy nftables kmod tini tzdata curl; \
+        for family in iptables ip6tables; do \
+            for suffix in '' -save -restore; do \
+                ln -sf "$(command -v "${family}-legacy${suffix}")" \
+                    "$(command -v "${family}${suffix}")"; \
+            done; \
+        done; \
     fi
+COPY --from=build /out/ /
+COPY --chmod=0755 entrypoint.sh /entrypoint.sh
+COPY mihomo-fs/ /
+RUN ln -s prizrak-core /usr/bin/mihomo && mkdir -p /etc/mihomo
 
-# Базовые образы для каждой архитектуры
-FROM --platform=linux/amd64 wiktorbgu/alpine-mikrotik:ip-nf-tables AS linux-amd64
-FROM --platform=linux/arm/v7 wiktorbgu/alpine-mikrotik:ip-nf-tables AS linux-armv7
-FROM --platform=linux/arm64 wiktorbgu/alpine-mikrotik:ip-nf-tables AS linux-arm64
-FROM --platform=linux/arm/v5 debian:trixie-slim AS linux-armv5
-
-# FINAL IMAGE
-FROM ${TARGETOS}-${TARGETARCH}${TARGETVARIANT}
-ARG TARGETPLATFORM \
-    TARGETARCH \
-    TARGETOS \
-    TARGETVARIANT
-
-COPY --from=build /tmp/build/ /
-
-# DISABLE_NFTABLES нужна именно для михомо
-ENV DISABLE_NFTABLES=1 \
+ENV NETWORK_MODE="proxy" \
+    LOG_LEVEL="info" \
+    EXTERNAL_UI_URL="" \
+    DISABLE_NFTABLES=1 \
     CONFIG="default_config.yaml" \
     WORKDIR="/etc/mihomo" \
     HEALTH_CHECK_ENABLE="true" \
@@ -169,7 +102,7 @@ ENV DISABLE_NFTABLES=1 \
     TUN_STACK="mips" \
     TUN_INET4_ADDRESS="198.19.0.1/30" \
     TUN_INET6_ADDRESS="fdfe:dcba:9876::1/126" \
-    TUN_AUTO_REDIRECT="true" \
+    TUN_AUTO_REDIRECT="false" \
     TUN_AUTO_DETECT_INTERFACE="true" \
     TUN_AUTO_ROUTE="true" \
     TUN_DISABLE_ICMP_FORWARDING="true" \
@@ -181,7 +114,7 @@ ENV DISABLE_NFTABLES=1 \
     DNS_USE_SYSTEM_HOSTS="true" \
     DNS_CACHE_ALGORITHM="arc" \
     DNS_PREFER_H3="false" \
-    DNS_LISTEN="0.0.0.0:53" \
+    DNS_LISTEN="0.0.0.0:1053" \
     DNS_ENHANCED_MODE="fake-ip" \
     DNS_FAKE_IP_RANGE="198.18.0.0/15" \
     DNS_FAKE_IP_TTL=1 \
@@ -200,32 +133,6 @@ ENV DISABLE_NFTABLES=1 \
     UNIFIED_DELAY="true" \
     LOADBALANCE_STRATEGY="consistent-hashing"
 
-RUN case "$TARGETPLATFORM" in \
-        "linux/arm/v5") \
-            apt update && \
-            apt install -y bash iptables tzdata gettext-base iputils-ping traceroute procps ca-certificates kmod tini iproute2 && \
-            apt autoremove -y && \
-            apt clean -y && \
-            rm -rf /var/cache/apt/archives /var/lib/apt/lists/* && \
-            sed -i '1s|^#!/bin/sh|#!/bin/bash|' /entrypoint.sh && \
-            # IPv4
-            rm /usr/sbin/iptables /usr/sbin/iptables-save /usr/sbin/iptables-restore && \
-            ln -s /usr/sbin/iptables-legacy /usr/sbin/iptables && \
-            ln -s /usr/sbin/iptables-legacy-save /usr/sbin/iptables-save && \
-            ln -s /usr/sbin/iptables-legacy-restore /usr/sbin/iptables-restore && \
-            # IPv6
-            rm /usr/sbin/ip6tables /usr/sbin/ip6tables-save /usr/sbin/ip6tables-restore && \
-            ln -s /usr/sbin/ip6tables-legacy /usr/sbin/ip6tables && \
-            ln -s /usr/sbin/ip6tables-legacy-save /usr/sbin/ip6tables-save && \
-            ln -s /usr/sbin/ip6tables-legacy-restore /usr/sbin/ip6tables-restore;; \
-        linux/arm/v7) \
-            apk add --no-cache envsubst ca-certificates && \
-            rm -vrf /var/cache/apk/* ;; \
-        linux/amd64 | linux/arm64) \
-            apk add --no-cache envsubst ca-certificates && \
-            rm -vrf /var/cache/apk/* ;; \
-        *) echo "Unsupported platform: $TARGETPLATFORM" && exit 1 ;; \
-    esac && \
-    chmod +x /entrypoint.sh
 
+EXPOSE 1080/tcp 1080/udp 9090/tcp 1053/tcp 1053/udp
 ENTRYPOINT ["tini", "--", "/entrypoint.sh"]

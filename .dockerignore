@@ -1,0 +1,13 @@
+.git
+.github
+.agents
+.codex
+.env
+.env.*
+data
+*.tar
+*.tar.gz
+*.log
+README.md
+compose*.yaml
+scripts

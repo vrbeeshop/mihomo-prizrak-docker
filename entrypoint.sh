@@ -1,95 +1,90 @@
-#!/bin/sh
-sleep 1
+#!/bin/bash
+set -e
 
-if [ -f /etc/alpine-release ]; then
-    OS="alpine"
-else
-    OS="other"
+# Explicit CLI arguments are passed to the core without preparing a container.
+# This also makes `-v`, `-h`, and `-t -f ...` usable without network privileges.
+RENDER_ONLY=0
+if [ "$#" -gt 0 ]; then
+    if [ "$#" -eq 1 ] && [ "$1" = "--render-config" ]; then
+        RENDER_ONLY=1
+    else
+        exec prizrak-core "$@"
+    fi
 fi
 
-lsmod | grep -q '^nf_tables' && NFT_CORE=1 || NFT_CORE=0
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+fail() { log "ERROR: $*" >&2; exit 1; }
 
-if [ "$OS" = "alpine" ]; then
-  # если в системе нет модуля nftables или принудительно хотим использовать iptables
-  if [ "${IPTABLES:-0}" -eq 1 ] || [ $NFT_CORE -eq 0 ]; then
-      # удалить nftables если есть
-      apk info -e nftables >/dev/null 2>&1 && apk del nftables >/dev/null 2>&1
-      # установить iptables если отсутствуют
-      apk info -e iptables >/dev/null 2>&1 || apk add iptables
-      # установить iptables-legacy если отсутствует и исправить символьные ссылки
-      if ! apk info -e iptables-legacy >/dev/null 2>&1; then
-        apk add iptables-legacy
-        # IPv4
-        rm -f /usr/sbin/iptables /usr/sbin/iptables-save /usr/sbin/iptables-restore
-        ln -s /usr/sbin/iptables-legacy         /usr/sbin/iptables
-        ln -s /usr/sbin/iptables-legacy-save    /usr/sbin/iptables-save
-        ln -s /usr/sbin/iptables-legacy-restore /usr/sbin/iptables-restore
-        # IPv6
-        rm -f /usr/sbin/ip6tables /usr/sbin/ip6tables-save /usr/sbin/ip6tables-restore
-        ln -s /usr/sbin/ip6tables-legacy         /usr/sbin/ip6tables
-        ln -s /usr/sbin/ip6tables-legacy-save    /usr/sbin/ip6tables-save
-        ln -s /usr/sbin/ip6tables-legacy-restore /usr/sbin/ip6tables-restore
-      fi
-  # если в системе есть модуль nftables
-  else
-      export DISABLE_NFTABLES=0
-      # удалить iptables и legacy если есть
-      if apk info -e iptables iptables-legacy >/dev/null 2>&1; then
-        apk del iptables iptables-legacy >/dev/null 2>&1
-      fi
-      # установить nftables если отсутствует
-      apk info -e nftables >/dev/null 2>&1 || apk add nftables
-  fi
+export WORKDIR="${WORKDIR:-/etc/mihomo}"
+export CONFIG="${CONFIG:-default_config.yaml}"
+export NETWORK_MODE="${NETWORK_MODE:-proxy}"
+export EXTERNAL_UI_PATH="${EXTERNAL_UI_PATH:-ui}"
+export LOG_LEVEL="${LOG_LEVEL:-info}"
+export UI_SECRET="${UI_SECRET:-}"
+export MIXED_BIND_ADDRESS="${MIXED_BIND_ADDRESS:-0.0.0.0}"
+TPROXY_PORT="${TPROXY_PORT:-15123}"
+TPROXY_MARK=0x123
+TPROXY_TABLE=100
+
+case "$NETWORK_MODE" in
+    proxy|tun|tproxy|mikrotik) ;;
+    *) fail "NETWORK_MODE must be proxy, tun, tproxy, or mikrotik (got '$NETWORK_MODE')" ;;
+esac
+
+# Detection is read-only, including during --render-config.
+NFT_CORE=0
+if [ "$NETWORK_MODE" != "proxy" ] && [ "${IPTABLES:-0}" != "1" ] && { grep -q '^nf_tables ' /proc/modules 2>/dev/null || { [ "$RENDER_ONLY" = 0 ] && nft list tables >/dev/null 2>&1; }; }; then
+    NFT_CORE=1
+fi
+export DISABLE_NFTABLES=$((1 - NFT_CORE))
+
+FIRST_IFACE=""
+OTHER_IFACES=""
+GATEWAY=""
+LOCAL_IPS=""
+if [ "$NETWORK_MODE" = "mikrotik" ] || [ "$NETWORK_MODE" = "tproxy" ]; then
+    FIRST_IFACE=$(ip -o link show | awk -F': ' '/link\/ether/ {print $2; exit}' | cut -d@ -f1)
+    FIRST_IFACE="${TPROXY_INTERFACE:-$FIRST_IFACE}"
+    OTHER_IFACES=$(ip -o link show | awk -F': ' '/link\/ether/ {print $2}' | cut -d@ -f1)
+    GATEWAY=$(ip route | awk -v iface="$FIRST_IFACE" '$1=="default" && $0~iface {print $3; exit}')
+    LOCAL_IPS=$(ip -4 -o addr show scope global | awk '{split($4,a,"/"); print a[1]}' | paste -sd, -)
+    if [ "$RENDER_ONLY" = 0 ] && [ -z "$FIRST_IFACE" ]; then
+      fail "No Ethernet interface found; set TPROXY_INTERFACE explicitly"
+    fi
 fi
 
-# настроить маскарад
-if [ "${IPTABLES:-0}" -eq 0 ] && [ $NFT_CORE -eq 1 ]; then
-  nft add table ip nat
-  nft add chain ip nat postrouting { type nat hook postrouting priority srcnat \; }
-  nft add rule ip nat postrouting meta oiftype ether ip daddr != { 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255} masquerade
+setup_mikrotik_network() {
+    # RouterOS-specific changes are confined to an explicitly selected mode.
+    if [ "$NFT_CORE" -eq 1 ]; then
+        nft delete table ip prizrak_nat 2>/dev/null || true
+        nft add table ip prizrak_nat
+        nft 'add chain ip prizrak_nat postrouting { type nat hook postrouting priority srcnat; }'
+        nft 'add rule ip prizrak_nat postrouting meta oiftype ether ip daddr != { 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255 } masquerade'
+    fi
+
+    # Remove the early main/default rules introduced by RouterOS 7.22.
+    ip rule | awk '
+    /lookup main/ && $1+0 < 32766 {gsub(":","",$1); print $1}
+    /lookup default/ && $1+0 < 32767 {gsub(":","",$1); print $1}
+    ' | while read -r prio; do
+        ip rule del priority "$prio"
+    done
+    ip rule | grep -q "lookup main" || ip rule add lookup main priority 32766
+    ip rule | grep -q "lookup default" || ip rule add lookup default priority 32767
+}
+
+if [ "$NETWORK_MODE" = "mikrotik" ] && [ "$RENDER_ONLY" = 0 ]; then
+    setup_mikrotik_network
 fi
-
-# network
-FIRST_IFACE=$(ip -o link show | awk -F': ' '/link\/ether/ {print $2; exit}' | cut -d@ -f1)
-OTHER_IFACES=$(ip -o link show | awk -F': ' '/link\/ether/ {print $2}' | cut -d@ -f1)
-GATEWAY=$(ip route | awk -v iface="$FIRST_IFACE" '$1=="default" && $0~iface {print $3; exit}')
-LOCAL_IPS=$(
-  ip -4 -o addr show scope global \
-  | awk '
-      NR==FNR && /link\/ether/ {
-          sub(/@.*/, "", $2)
-          iface[$2]=1
-          next
-      }
-      $2 in iface {
-          split($4,a,"/")
-          print a[1]
-      }
-    ' <(ip -o link show) - \
-  | paste -sd, -
-)
-
-# удалить ранние main/default for ros = 7.22
-ip rule | awk '
-/lookup main/ && $1+0 < 32766 {gsub(":","",$1); print $1}
-/lookup default/ && $1+0 < 32767 {gsub(":","",$1); print $1}
-' | while read prio; do
-    ip rule del priority "$prio" 2>/dev/null
-done
-# гарантировать системные правила
-ip rule | grep -q "lookup main" || ip rule add lookup main priority 32766
-ip rule | grep -q "lookup default" || ip rule add lookup default priority 32767
 
 #
 AWG_DIR="$WORKDIR/awg"
 TEMPLATE_DIR="$WORKDIR/template"
 USER_SH_DIR="$WORKDIR/user_sh"
 mkdir -p "$AWG_DIR" "$TEMPLATE_DIR" "$USER_SH_DIR"
-DEFAULT_CONFIG_FILE="/etc/mihomo_preset/template/default_config.yaml"
+DEFAULT_CONFIG_FILE="${DEFAULT_CONFIG_FILE:-/etc/mihomo_preset/template/default_config.yaml}"
 TEMPLATE_FILE="$TEMPLATE_DIR/$CONFIG"
 BACKUP_PATH="$TEMPLATE_DIR/default_config_old.yaml"
-
-log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
 # если не указано имя кастомного конфига, испольузем и актуализируем default
 if [ "$CONFIG" = "default_config.yaml" ]; then
@@ -119,9 +114,12 @@ fi
 
 # смена веб панели при замене ссылки на её загрузку
 UI_URL_CHECK="$WORKDIR/.ui_url"
-LAST_UI_URL=$(cat "$UI_URL_CHECK" 2>/dev/null)
-if [[ "$EXTERNAL_UI_URL" != "$LAST_UI_URL" ]]; then
-  rm -rf "$WORKDIR/$EXTERNAL_UI_PATH"
+LAST_UI_URL=$(cat "$UI_URL_CHECK" 2>/dev/null || true)
+if [ "$RENDER_ONLY" = 0 ] && [[ "$EXTERNAL_UI_URL" != "$LAST_UI_URL" ]]; then
+  if [[ "$EXTERNAL_UI_PATH" = /* || "$EXTERNAL_UI_PATH" = . || "$EXTERNAL_UI_PATH" = .. || "/$EXTERNAL_UI_PATH/" = */../* ]]; then
+    fail "EXTERNAL_UI_PATH must be a relative directory inside WORKDIR"
+  fi
+  rm -rf -- "$WORKDIR/$EXTERNAL_UI_PATH"
   echo "$EXTERNAL_UI_URL" > "$UI_URL_CHECK"
 fi
 
@@ -131,6 +129,10 @@ if [ ! -f "$HWID_STORE" ]; then
   cat /proc/sys/kernel/random/uuid | tr -d '-' > "$HWID_STORE"
 fi
 HWID="${HWID:-$(cat "$HWID_STORE")}"
+
+yaml_quote() {
+  sed 's/\\/\\\\/g; s/"/\\"/g; s/.*/"&"/'
+}
 
 format_yaml_list() {
     local value="$1"
@@ -143,7 +145,8 @@ format_yaml_list() {
 
     # Раскрываем вложенные ENV-переменные, если разрешено
     if [ "$expand" = "1" ]; then
-        eval "value=\"$value\""
+        # Expand only documented DNS references once; shell code stays literal.
+        value=$(printf '%s' "$value" | envsubst '${DNS} ${DNS_BOOTSTRAP}')
     fi
 
     printf '%s\n' "$value" |
@@ -163,19 +166,15 @@ format_yaml_list() {
         done
 }
 
-DNS_NAMESERVER=$(format_yaml_list "${DNS_NAMESERVER:-}" 4)
-DNS_DEFAULT_NAMESERVER=$(format_yaml_list "${DNS_DEFAULT_NAMESERVER:-}" 4)
-DNS_PROXY_SERVER_NAMESERVER=$(format_yaml_list "${DNS_PROXY_SERVER_NAMESERVER:-}" 4)
-DNS_FAKE_IP_FILTER=$(format_yaml_list "${DNS_FAKE_IP_FILTER:-}" 4)
+DNS_NAMESERVER=$(format_yaml_list "${DNS_NAMESERVER:-}" 4 '|' 1)
+DNS_DEFAULT_NAMESERVER=$(format_yaml_list "${DNS_DEFAULT_NAMESERVER:-}" 4 '|' 1)
+DNS_PROXY_SERVER_NAMESERVER=$(format_yaml_list "${DNS_PROXY_SERVER_NAMESERVER:-}" 4 '|' 1)
+DNS_FAKE_IP_FILTER=$(format_yaml_list "${DNS_FAKE_IP_FILTER:-}" 4 '|' 1 0)
 
 export DNS_NAMESERVER
 export DNS_DEFAULT_NAMESERVER
 export DNS_PROXY_SERVER_NAMESERVER
 export DNS_FAKE_IP_FILTER
-
-yaml_quote() {
-  sed 's/\\/\\\\/g; s/"/\\"/g; s/.*/"&"/'
-}
 
 ###
 parse_awg_config() {
@@ -446,8 +445,8 @@ set_default_var() {
     local var="$2"
     local value
 
-    value="$(printenv "${var}_${name}")"
-    [ -z "$value" ] && value="$(printenv "$var")"
+    value="$(printenv "${var}_${name}" || true)"
+    [ -z "$value" ] && value="$(printenv "$var" || true)"
 
     printf '%s' "$value"
 }
@@ -516,7 +515,7 @@ add_provider() {
 
     for param in tfo mptcp udp udp-over-tcp down up skip-cert-verify name-cert-verify dialer-proxy additional-prefix additional-suffix; do
         var="PROVIDER_$(printf '%s' "$param" | tr '[:lower:]-' '[:upper:]_')_${name}"
-        value="$(printenv "$var")"
+        value="$(printenv "$var" || true)"
         [ -n "$value" ] || continue
 
         case "$param" in
@@ -574,12 +573,12 @@ if env | grep -qE '^SRV[0-9]'; then
     while IFS='=' read -r name value; do
         case "$name" in
             SRV[0-9]*)
-                # HTTP(S) подписки и deeplink-форматы hpwnr направляем в HTTPVehicle Mihomo
-                # Mihomo сам вызовет hpwnr для happ/v2raytun/incy, а обычные proxy URI
-                # оставляем в локальном file-provider без передачи внешней программе.
+                [ -n "$value" ] || continue
+                # HTTP(S) subscriptions use the core downloader; node URIs
+                # are read by its native parser through a local file provider.
                 srv_scheme=$(printf '%s' "$value" | sed 's/:.*//' | tr '[:upper:]' '[:lower:]')
                 case "$srv_scheme" in
-                    http|https|happ|v2raytun|incy)
+                    http|https)
                         add_provider "$name" "http" "$value"
                         ;;
                     *)
@@ -615,6 +614,7 @@ fi
 while IFS='=' read -r name value; do
     case "$name" in
         SUB[0-9]*)
+            [ -n "$value" ] || continue
             add_provider "$name" "http" "$value"
             ;;
     esac
@@ -623,7 +623,7 @@ $(env)
 EOF
 
 ### VETH
-if [ -n "$OTHER_IFACES" ]; then
+if [ "$NETWORK_MODE" = "mikrotik" ] && [ -n "$OTHER_IFACES" ]; then
   # Для дополнительных VETH используем модель multi-WAN Mihomo:
   # отдельная таблица маршрутизации + fwmark, который выставляет сам direct proxy.
   # Это корректно работает для UDP при interface-name.
@@ -632,12 +632,7 @@ if [ -n "$OTHER_IFACES" ]; then
   veth_file="$WORKDIR/veth.yaml"
   IFACE_COUNT=$(echo "$OTHER_IFACES" | wc -w)
 
-  # если нет ни серверов ни конфигов awg ни дополнительных veth — добавляем единственный DIRECT
-  if [ -z "$PROVIDERS_LIST" ] && [ "$IFACE_COUNT" -eq 1 ]; then
-    PROVIDERS_LIST="${PROVIDERS_LIST}    proxies:
-      - DIRECT"
-  # либо добавляем все остальные veth как прокси
-  elif [ "$IFACE_COUNT" -gt 1 ]; then
+  if [ "$IFACE_COUNT" -gt 1 ]; then
     echo "proxies:" > "$veth_file"
     for IFACE in $OTHER_IFACES; do
       [ "$IFACE" = "$FIRST_IFACE" ] && continue
@@ -665,12 +660,12 @@ if [ -n "$OTHER_IFACES" ]; then
 EOF
 
       # Policy routing по mark: именно эту схему использует Mihomo для multi-VETH.
-      if ! ip rule show | grep -q "fwmark $MARK_HEX lookup $TABLE"; then
-        ip rule add fwmark "$MARK" table "$TABLE" pref "$RULE_PREF"
+      if [ "$RENDER_ONLY" = 0 ]; then
+        if ! ip rule show | grep -q "fwmark $MARK_HEX lookup $TABLE"; then
+          ip rule add fwmark "$MARK" table "$TABLE" pref "$RULE_PREF"
+        fi
+        ip route replace "$SRC_CIDR" dev "$IFACE" src "$SRC_IP" table "$TABLE"
       fi
-
-      # В таблице обязательно должен быть connected route, иначе gateway может некорректно резолвиться/обрабатываться для отдельного policy table.
-      ip route replace "$SRC_CIDR" dev "$IFACE" src "$SRC_IP" table "$TABLE"
 
       # задать шлюзом интерфейса VETH соседний контейнер в той же подсети, если задана переменная
       # нормализуем имя интерфейса и IP для поиска переменной
@@ -685,52 +680,62 @@ EOF
         # fallback
         else GATEWAY_VETH="$GATEWAY"; \
       fi
-      ip route replace default via "$GATEWAY_VETH" dev "$IFACE" table "$TABLE"
+      if [ "$RENDER_ONLY" = 0 ]; then
+        ip route replace default via "$GATEWAY_VETH" dev "$IFACE" table "$TABLE"
+      fi
 
       i=$((i+1))
     done
-    add_provider "VETH" "file" "$veth_file"
+    if [ "$i" -gt 0 ]; then
+      add_provider "VETH" "file" "$veth_file"
+    fi
   fi
+fi
+
+# Empty groups remain valid even with no subscriptions or Ethernet interfaces.
+if [ -z "$PROVIDERS_LIST" ]; then
+  PROVIDERS_LIST="      []
+    proxies:
+      - DIRECT"
 fi
 
 # правила nft для настройки tproxy
 nft_rules() {
-  TPROXY_PORT=15123
-  TPROXY_MARK=0x123
-  TPROXY_TABLE=100
+  command -v nft >/dev/null || fail "tproxy mode requires nftables"
+  nft delete table inet prizrak_tproxy 2>/dev/null || true
 
  # --- nftables table ---
-  nft add table inet tproxy_ci
+  nft add table inet prizrak_tproxy
 
   # --- divert chain для ускорения TCP ---
-  nft "add chain inet tproxy_ci divert {
+  nft "add chain inet prizrak_tproxy divert {
     type filter hook prerouting priority mangle - 5;
     policy accept;
   }"
 
   # --- socket transparent (ускоряет established TCP) ---
-  nft add rule inet tproxy_ci divert \
+  nft add rule inet prizrak_tproxy divert \
     meta l4proto tcp socket transparent 1 \
     meta mark set $TPROXY_MARK \
     accept
 
   # --- prerouting (mangle, но не слишком рано) ---
-  nft "add chain inet tproxy_ci prerouting {
+  nft "add chain inet prizrak_tproxy prerouting {
     type filter hook prerouting priority mangle;
     policy accept;
   }"
 
   # --- исключаем все локальные сервисы и служебные адреса ---
-  if ! nft add rule inet tproxy_ci prerouting fib daddr type { local, broadcast, multicast } return 2>/dev/null; then
+  if ! nft add rule inet prizrak_tproxy prerouting fib daddr type { local, broadcast, multicast } return 2>/dev/null; then
     # for ros < 7.22
-    nft add rule inet tproxy_ci prerouting ip daddr { 0.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255, $LOCAL_IPS } return
+    nft add rule inet prizrak_tproxy prerouting ip daddr { 0.0.0.0/8, 127.0.0.0/8, 169.254.0.0/16, 224.0.0.0/4, 255.255.255.255, $LOCAL_IPS } return
   fi
 
   # --- защита от MPTCP ---
-  nft add rule inet tproxy_ci prerouting tcp option mptcp exists drop
+  nft add rule inet prizrak_tproxy prerouting tcp option mptcp exists drop
 
   # --- TPROXY ---
-  nft add rule inet tproxy_ci prerouting \
+  nft add rule inet prizrak_tproxy prerouting \
     iifname \""$FIRST_IFACE"\" \
     meta l4proto { tcp, udp } \
     meta mark set $TPROXY_MARK \
@@ -738,14 +743,16 @@ nft_rules() {
     accept
 
   # --- policy routing ---
-  ip rule add fwmark $TPROXY_MARK lookup $TPROXY_TABLE pref 100
+  if ! ip rule show | grep -q "fwmark $TPROXY_MARK lookup $TPROXY_TABLE"; then
+    ip rule add fwmark $TPROXY_MARK lookup $TPROXY_TABLE pref 100
+  fi
   ip route replace local 0.0.0.0/0 dev lo table $TPROXY_TABLE proto static scope host
 
   # если ядро без IPv6 — просто пропускаем
-  [ -f /proc/net/if_inet6 ] || return 0
+  [ -f /proc/net/if_inet6 ] && [ "${IPV6:-true}" = true ] || return 0
 
   # --- TPROXY IPv6 ---
-  nft add rule inet tproxy_ci prerouting \
+  nft add rule inet prizrak_tproxy prerouting \
       iifname \""$FIRST_IFACE"\" \
       meta l4proto { tcp, udp } \
       meta mark set $TPROXY_MARK \
@@ -753,16 +760,31 @@ nft_rules() {
       accept
 
   # --- policy routing IPv6 ---
-  ip -6 rule add fwmark $TPROXY_MARK lookup $TPROXY_TABLE pref 100
+  if ! ip -6 rule show | grep -q "fwmark $TPROXY_MARK lookup $TPROXY_TABLE"; then
+    ip -6 rule add fwmark $TPROXY_MARK lookup $TPROXY_TABLE pref 100
+  fi
   ip -6 route replace local ::/0 dev lo table $TPROXY_TABLE
 }
 
-# если это шаблон, выполняем преднастройки
-if [ "${ENVSUBST:-1}" -eq 1 ]; then
-  # AUTO CONFIG tun-in
-if grep -Eq '^[[:space:]]*\$TUN_IN_AUTOCONFIG' "$CONFIG_FILE"; then
-  if [ "${TUN:-0}" -eq 1 ] || [ $NFT_CORE -eq 0 ]; then
-  TUN_IN_AUTOCONFIG=$(cat <<EOF
+# Generate the listener independently of privileges; --render-config never
+# installs firewall rules, routes, or invokes user scripts.
+TUN_IN_AUTOCONFIG=""
+LISTENER_MODE="$NETWORK_MODE"
+if [ "$NETWORK_MODE" = "mikrotik" ]; then
+  if [ "${TUN:-0}" = 1 ] || [ "$NFT_CORE" -eq 0 ]; then
+    LISTENER_MODE=tun
+  else
+    LISTENER_MODE=tproxy
+  fi
+fi
+
+if [ "${ENVSUBST:-1}" = 1 ] && grep -Eq '^[[:space:]]*\$TUN_IN_AUTOCONFIG' "$CONFIG_FILE"; then
+  case "$LISTENER_MODE" in
+    tun)
+      if [ "$RENDER_ONLY" = 0 ] && [ ! -c /dev/net/tun ] && [ ! -c /dev/tun ]; then
+        fail "TUN requires /dev/net/tun or /dev/tun; mount the device and add NET_ADMIN, or choose NETWORK_MODE=proxy"
+      fi
+      TUN_IN_AUTOCONFIG=$(cat <<EOF
   - name: tun-in
     type: tun
     stack: $TUN_STACK
@@ -779,40 +801,51 @@ if grep -Eq '^[[:space:]]*\$TUN_IN_AUTOCONFIG' "$CONFIG_FILE"; then
     udp-timeout: 300
     disable-icmp-forwarding: $TUN_DISABLE_ICMP_FORWARDING
 EOF
-)  
-else
-  nft_rules
-  TUN_IN_AUTOCONFIG=$(cat <<EOF
+)
+      ;;
+    tproxy)
+      # An IPv4 bind cannot receive the IPv6 packets redirected to ::1.
+      # The core enables IPv6 transparent socket options for an IPv6 bind.
+      TPROXY_BIND_ADDRESS=0.0.0.0
+      if [ "${IPV6:-true}" = true ] && [ -f /proc/net/if_inet6 ]; then
+        TPROXY_BIND_ADDRESS=::
+      fi
+      if [ "$RENDER_ONLY" = 0 ]; then
+        nft_rules
+      fi
+      TUN_IN_AUTOCONFIG=$(cat <<EOF
   - name: tun-in
     type: tproxy
+    listen: "$TPROXY_BIND_ADDRESS"
     port: $TPROXY_PORT
     udp: true
 EOF
 )
+      ;;
+  esac
 fi
 export TUN_IN_AUTOCONFIG
-fi
-# конец проверки шаблона
-fi
 
-# пользовательские sh-скрипты подключаются (source) и выполняются в текущем shell-процессе с общим окружением
-for script in "$USER_SH_DIR"/*.sh; do
-  [ -f "$script" ] || continue
-  log "Running user scripts: $script"
-  . "$script"
-done
-
-# экспортируем переменные заданные текущим скриптом для использования в шаблонах конфигурации mihomo
-export PROVIDERS_BLOCK
-export PROVIDERS_LIST
-export HWID
-
-# если это шаблон, заполняем переменными конфиг файл
-if [ "${ENVSUBST:-1}" -eq 1 ]; then
-  envsubst < "$TEMPLATE_FILE" > "$WORKDIR/$CONFIG"
+# User hooks retain the original shared-shell environment during real startup.
+if [ "$RENDER_ONLY" = 0 ]; then
+  for script in "$USER_SH_DIR"/*.sh; do
+    [ -f "$script" ] || continue
+    log "Running user scripts: $script"
+    . "$script"
+  done
 fi
 
-CMD_MIHOMO="${@:-"-d $WORKDIR -f $WORKDIR/$CONFIG"}"
-# print version mihomo to log
-log "$(mihomo -v)"
-exec mihomo $CMD_MIHOMO || exit 1
+export PROVIDERS_BLOCK PROVIDERS_LIST HWID
+
+if [ "${ENVSUBST:-1}" = 1 ]; then
+  envsubst < "$CONFIG_FILE" > "$WORKDIR/$CONFIG"
+fi
+
+if [ "$RENDER_ONLY" = 1 ]; then
+  printf '%s\n' "$WORKDIR/$CONFIG"
+  exit 0
+fi
+
+log "Network mode: $NETWORK_MODE"
+log "$(prizrak-core -v)"
+exec prizrak-core -d "$WORKDIR" -f "$WORKDIR/$CONFIG"
