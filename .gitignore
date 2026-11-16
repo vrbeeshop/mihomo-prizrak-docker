@@ -5,3 +5,5 @@
 *.tar
 *.tar.gz
 *.log
+__pycache__/
+*.py[cod]

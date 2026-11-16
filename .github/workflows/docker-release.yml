@@ -20,6 +20,8 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       image: ${{ steps.version.outputs.image }}
+      core_version: ${{ steps.core.outputs.prizrak_version }}
+      core_commit: ${{ steps.core.outputs.prizrak_commit }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -50,6 +52,15 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
+      - name: Test core resolution and release metadata
+        run: python3 scripts/test-release-tools.py
+
+      - name: Resolve latest stable Prizrak-Core once
+        id: core
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/resolve-core.py >> "$GITHUB_OUTPUT"
+
   test:
     name: Test ${{ matrix.variant }} on amd64
     needs: version
@@ -73,7 +84,7 @@ jobs:
 
       - name: Check shell syntax
         run: |
-          for script in entrypoint.sh scripts/smoke-test.sh; do
+          for script in entrypoint.sh scripts/*.sh; do
             bash -n "$script"
           done
 
@@ -87,6 +98,8 @@ jobs:
           platforms: linux/amd64
           build-args: |
             APP_VERSION=${{ needs.version.outputs.version }}
+            PRIZRAK_VERSION=${{ needs.version.outputs.core_version }}
+            PRIZRAK_COMMIT=${{ needs.version.outputs.core_commit }}
             WITH_GVISOR=${{ matrix.with_gvisor }}
             UPX=${{ matrix.upx }}
           load: true
@@ -107,6 +120,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7.0.1
@@ -129,12 +144,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and publish multi-platform image
+        id: build
         uses: docker/build-push-action@v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v5
           build-args: |
             APP_VERSION=${{ needs.version.outputs.version }}
+            PRIZRAK_VERSION=${{ needs.version.outputs.core_version }}
+            PRIZRAK_COMMIT=${{ needs.version.outputs.core_commit }}
             WITH_GVISOR=0
             UPX=0
           push: true
@@ -145,3 +163,62 @@ jobs:
             type=gha,scope=test-standard
             type=gha,scope=release
           cache-to: type=gha,mode=max,scope=release
+
+  release:
+    name: Record published component versions in GitHub Release
+    needs: [version, publish]
+    if: github.event_name == 'push' && !github.event.deleted && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Login to GHCR for published-image metadata
+        uses: docker/login-action@v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read metadata from the published image and generate notes
+        env:
+          IMAGE: ${{ needs.version.outputs.image }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          VERSION: ${{ needs.version.outputs.version }}
+          CORE_VERSION: ${{ needs.version.outputs.core_version }}
+          CORE_COMMIT: ${{ needs.version.outputs.core_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_COMMIT=$(git rev-parse HEAD)
+          docker pull --platform linux/amd64 "$IMAGE@$DIGEST"
+          docker run --rm --platform linux/amd64 --network none --cap-drop ALL \
+            --entrypoint cat "$IMAGE@$DIGEST" /usr/share/prizrak-core/build-info \
+            > "$RUNNER_TEMP/build-info-amd64.txt"
+          python3 scripts/release-notes.py \
+            --metadata "$RUNNER_TEMP/build-info-amd64.txt" \
+            --version "$VERSION" --core-version "$CORE_VERSION" --core-commit "$CORE_COMMIT" \
+            --image "$IMAGE" --digest "$DIGEST" --source-commit "$SOURCE_COMMIT" \
+            --output "$RUNNER_TEMP/release-notes.md"
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release edit "$VERSION" --title "$VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
+            gh release upload "$VERSION" "$RUNNER_TEMP/build-info-amd64.txt" --clobber
+          else
+            gh release create "$VERSION" "$RUNNER_TEMP/build-info-amd64.txt" \
+              --verify-tag --title "$VERSION" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi
