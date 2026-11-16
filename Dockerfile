@@ -72,6 +72,29 @@ RUN set -eu; \
     fi; \
     printf 'upx=%s\n' "$UPX_APPLIED" >> /out/usr/share/prizrak-core/build-info
 
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS config-build
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
+WORKDIR /src
+COPY tools/config/ ./
+ENV CGO_ENABLED=0 \
+    GOCACHE=/var/cache/go-build \
+    GOMODCACHE=/go/pkg/mod
+RUN --mount=type=cache,id=prizrak-go-mod,target=/go/pkg/mod \
+    --mount=type=cache,id=prizrak-go-build,target=/var/cache/go-build \
+    set -eu; \
+    go test ./...; \
+    case "$TARGETOS/$TARGETARCH/$TARGETVARIANT" in \
+        linux/amd64/*) export GOAMD64=v1 ;; \
+        linux/arm64/*) ;; \
+        linux/arm/v7) export GOARM=7 ;; \
+        linux/arm/v5) export GOARM=5 ;; \
+        *) echo 'Unsupported configuration-tool target' >&2; exit 1 ;; \
+    esac; \
+    GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -trimpath \
+        -ldflags '-s -w -buildid=' -o /out/prizrak-config .
+
 FROM ${ALPINE_IMAGE} AS linux-amd64
 FROM ${ALPINE_IMAGE} AS linux-arm64
 FROM ${ALPINE_IMAGE} AS linux-armv7
@@ -91,7 +114,7 @@ RUN set -eu; \
     if [ "$TARGETARCH/$TARGETVARIANT" = arm/v5 ]; then \
         apt-get update; \
         apt-get install -y --no-install-recommends bash ca-certificates gettext-base \
-            iproute2 iptables nftables kmod tini tzdata curl; \
+            iproute2 iptables nftables kmod tini tzdata curl util-linux; \
         update-alternatives --set iptables /usr/sbin/iptables-legacy; \
         update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy; \
         rm -rf /var/lib/apt/lists/*; \
@@ -106,9 +129,12 @@ RUN set -eu; \
         done; \
     fi
 COPY --from=build /out/ /
+COPY --from=config-build /out/prizrak-config /usr/bin/prizrak-config
 COPY --chmod=0755 entrypoint.sh /entrypoint.sh
+COPY --chmod=0644 runtime/subscription.sh /usr/lib/prizrak/subscription.sh
 COPY mihomo-fs/ /
 RUN set -eu; \
+    chmod 0755 /usr/lib/prizrak; \
     ln -s prizrak-core /usr/bin/mihomo; \
     mkdir -p /etc/mihomo; \
     RUNTIME_IMAGE="$ALPINE_IMAGE"; \
@@ -145,6 +171,7 @@ ENV NETWORK_MODE="proxy" \
     IPV6="true" \
     IP_VERSION="dual" \
     PROVIDER_INTERVAL=3600 \
+    SUBSCRIPTION_TIMEOUT=30 \
     DNS_ENABLE="true" \
     DNS_USE_SYSTEM_HOSTS="true" \
     DNS_CACHE_ALGORITHM="arc" \
@@ -165,6 +192,7 @@ ENV NETWORK_MODE="proxy" \
     KEEP_ALIVE_INTERVAL=30 \
     FIND_PROCESS_MODE="off" \
     STORE_SELECTED="true" \
+    STORE_FAKE_IP="true" \
     UNIFIED_DELAY="true" \
     LOADBALANCE_STRATEGY="consistent-hashing"
 

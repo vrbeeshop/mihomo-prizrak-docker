@@ -73,10 +73,6 @@ setup_mikrotik_network() {
     ip rule | grep -q "lookup default" || ip rule add lookup default priority 32767
 }
 
-if [ "$NETWORK_MODE" = "mikrotik" ] && [ "$RENDER_ONLY" = 0 ]; then
-    setup_mikrotik_network
-fi
-
 #
 AWG_DIR="$WORKDIR/awg"
 TEMPLATE_DIR="$WORKDIR/template"
@@ -573,6 +569,7 @@ if env | grep -qE '^SRV[0-9]'; then
     while IFS='=' read -r name value; do
         case "$name" in
             SRV[0-9]*)
+                [[ "$name" =~ ^SRV[0-9]+$ ]] || continue
                 [ -n "$value" ] || continue
                 # HTTP(S) subscriptions use the core downloader; node URIs
                 # are read by its native parser through a local file provider.
@@ -614,6 +611,7 @@ fi
 while IFS='=' read -r name value; do
     case "$name" in
         SUB[0-9]*)
+            [[ "$name" =~ ^SUB[0-9]+$ ]] || continue
             [ -n "$value" ] || continue
             add_provider "$name" "http" "$value"
             ;;
@@ -623,6 +621,10 @@ $(env)
 EOF
 
 ### VETH
+VETH_INTERFACES=()
+VETH_CIDRS=()
+VETH_IPS=()
+VETH_GATEWAYS=()
 if [ "$NETWORK_MODE" = "mikrotik" ] && [ -n "$OTHER_IFACES" ]; then
   # Для дополнительных VETH используем модель multi-WAN Mihomo:
   # отдельная таблица маршрутизации + fwmark, который выставляет сам direct proxy.
@@ -659,14 +661,6 @@ if [ "$NETWORK_MODE" = "mikrotik" ] && [ -n "$OTHER_IFACES" ]; then
   routing-mark: $MARK
 EOF
 
-      # Policy routing по mark: именно эту схему использует Mihomo для multi-VETH.
-      if [ "$RENDER_ONLY" = 0 ]; then
-        if ! ip rule show | grep -q "fwmark $MARK_HEX lookup $TABLE"; then
-          ip rule add fwmark "$MARK" table "$TABLE" pref "$RULE_PREF"
-        fi
-        ip route replace "$SRC_CIDR" dev "$IFACE" src "$SRC_IP" table "$TABLE"
-      fi
-
       # задать шлюзом интерфейса VETH соседний контейнер в той же подсети, если задана переменная
       # нормализуем имя интерфейса и IP для поиска переменной
       SAFE_IFACE=$(echo "$IFACE" | tr '-' '_')
@@ -680,9 +674,10 @@ EOF
         # fallback
         else GATEWAY_VETH="$GATEWAY"; \
       fi
-      if [ "$RENDER_ONLY" = 0 ]; then
-        ip route replace default via "$GATEWAY_VETH" dev "$IFACE" table "$TABLE"
-      fi
+      VETH_INTERFACES+=("$IFACE")
+      VETH_CIDRS+=("$SRC_CIDR")
+      VETH_IPS+=("$SRC_IP")
+      VETH_GATEWAYS+=("$GATEWAY_VETH")
 
       i=$((i+1))
     done
@@ -691,6 +686,22 @@ EOF
     fi
   fi
 fi
+
+setup_veth_network() {
+  local index table mark_hex rule_pref
+  for index in "${!VETH_INTERFACES[@]}"; do
+    table=$((201 + index))
+    rule_pref=$((150 + index))
+    mark_hex=$(printf '0x%x' "$table")
+    if ! ip rule show | grep -q "fwmark $mark_hex lookup $table"; then
+      ip rule add fwmark "$table" table "$table" pref "$rule_pref"
+    fi
+    ip route replace "${VETH_CIDRS[$index]}" dev "${VETH_INTERFACES[$index]}" \
+      src "${VETH_IPS[$index]}" table "$table"
+    ip route replace default via "${VETH_GATEWAYS[$index]}" \
+      dev "${VETH_INTERFACES[$index]}" table "$table"
+  done
+}
 
 # Empty groups remain valid even with no subscriptions or Ethernet interfaces.
 if [ -z "$PROVIDERS_LIST" ]; then
@@ -770,6 +781,7 @@ nft_rules() {
 # installs firewall rules, routes, or invokes user scripts.
 TUN_IN_AUTOCONFIG=""
 LISTENER_MODE="$NETWORK_MODE"
+NETWORK_TPROXY_REQUIRED=0
 if [ "$NETWORK_MODE" = "mikrotik" ]; then
   if [ "${TUN:-0}" = 1 ] || [ "$NFT_CORE" -eq 0 ]; then
     LISTENER_MODE=tun
@@ -810,9 +822,7 @@ EOF
       if [ "${IPV6:-true}" = true ] && [ -f /proc/net/if_inet6 ]; then
         TPROXY_BIND_ADDRESS=::
       fi
-      if [ "$RENDER_ONLY" = 0 ]; then
-        nft_rules
-      fi
+      NETWORK_TPROXY_REQUIRED=1
       TUN_IN_AUTOCONFIG=$(cat <<EOF
   - name: tun-in
     type: tproxy
@@ -837,8 +847,42 @@ fi
 
 export PROVIDERS_BLOCK PROVIDERS_LIST HWID
 
+# A complete subscription is selected only for the standard configuration.
+# Explicit CONFIG files/templates remain authoritative.
+SUBSCRIPTION_ENABLED=0
+if [ "$CONFIG" = default_config.yaml ] && [ "${ENVSUBST:-1}" = 1 ]; then
+  while IFS= read -r variable; do
+    if [[ "$variable" =~ ^SUB[0-9]+$ ]] && [ -n "${!variable}" ]; then
+      SUBSCRIPTION_ENABLED=1
+      break
+    elif [[ "$variable" =~ ^SRV[0-9]+$ ]]; then
+      case "${!variable}" in
+        [hH][tT][tT][pP]://*|[hH][tT][tT][pP][sS]://*) SUBSCRIPTION_ENABLED=1; break ;;
+      esac
+    fi
+  done < <(compgen -e)
+fi
+
+RENDERED_CONFIG="$WORKDIR/$CONFIG"
+if [ "$SUBSCRIPTION_ENABLED" = 1 ]; then
+  SUBSCRIPTION_LIB="${SUBSCRIPTION_LIB:-/usr/lib/prizrak/subscription.sh}"
+  [ -f "$SUBSCRIPTION_LIB" ] || fail "Subscription runtime is missing; rebuild the image"
+  . "$SUBSCRIPTION_LIB"
+  # Render to a separate private file so a failed download or validation never
+  # overwrites the last working primary configuration.
+  RENDERED_CONFIG=$(mktemp "$WORKDIR/.container-base.XXXXXX")
+fi
+
 if [ "${ENVSUBST:-1}" = 1 ]; then
-  envsubst < "$CONFIG_FILE" > "$WORKDIR/$CONFIG"
+  envsubst < "$CONFIG_FILE" > "$RENDERED_CONFIG"
+fi
+
+if [ "$SUBSCRIPTION_ENABLED" = 1 ]; then
+  if ! subscription_prepare "$RENDERED_CONFIG" "$WORKDIR/$CONFIG"; then
+    rm -f -- "$RENDERED_CONFIG"
+    fail "Unable to prepare the subscription configuration; previous config retained"
+  fi
+  rm -f -- "$RENDERED_CONFIG"
 fi
 
 if [ "$RENDER_ONLY" = 1 ]; then
@@ -846,6 +890,18 @@ if [ "$RENDER_ONLY" = 1 ]; then
   exit 0
 fi
 
+# Firewall and policy routing are prepared only after a usable config exists.
+if [ "$NETWORK_MODE" = mikrotik ] || [ "$NETWORK_TPROXY_REQUIRED" = 1 ]; then
+  prizrak-core -t -d "$WORKDIR" -f "$WORKDIR/$CONFIG" >/dev/null \
+    || fail "Cannot configure networking for an invalid configuration"
+fi
+if [ "$NETWORK_MODE" = mikrotik ]; then
+  setup_mikrotik_network
+  setup_veth_network
+fi
+if [ "$NETWORK_TPROXY_REQUIRED" = 1 ]; then nft_rules; fi
+
+if [ "$SUBSCRIPTION_ENABLED" = 1 ]; then subscription_start_updater "$$"; fi
 log "Network mode: $NETWORK_MODE"
 log "$(prizrak-core -v)"
 exec prizrak-core -d "$WORKDIR" -f "$WORKDIR/$CONFIG"

@@ -21,6 +21,7 @@ keep-alive-interval: $KEEP_ALIVE_INTERVAL
 
 profile:
   store-selected: $STORE_SELECTED
+  store-fake-ip: $STORE_FAKE_IP
 
 dns:
   enable: $DNS_ENABLE
@@ -92,6 +93,17 @@ listeners:
 $TUN_IN_AUTOCONFIG
 
 rules:
+  - DOMAIN-SUFFIX,lan,DIRECT
+  - DOMAIN-SUFFIX,local,DIRECT
+  - DOMAIN-SUFFIX,home.arpa,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+  - IP-CIDR6,::1/128,DIRECT,no-resolve
+  - IP-CIDR6,fc00::/7,DIRECT,no-resolve
+  - IP-CIDR6,fe80::/10,DIRECT,no-resolve
   - AND,((NETWORK,udp),(DST-PORT,443)),QUIC UDP 443
   - IN-NAME,tun-in,SELECTOR
   - IN-NAME,mixed-in,SELECTOR
