@@ -1,12 +1,7 @@
 # Standalone file: docker compose -f compose.tun.yaml up -d
 services:
   prizrak:
-    image: ${PRIZRAK_IMAGE:-ghcr.io/vrbeeshop/mihomo-prizrak-docker:latest}
-    build:
-      context: .
-      args:
-        WITH_GVISOR: ${WITH_GVISOR:-0}
-        UPX: ${UPX:-0}
+    image: ghcr.io/vrbeeshop/mihomo-prizrak-docker:latest
     restart: unless-stopped
     env_file:
       - .env

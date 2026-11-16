@@ -6,7 +6,7 @@ Prizrak-Core добавляет к mihomo возможности Xray: XHTTP, RE
 
 ## Быстрый запуск на домашнем сервере
 
-Выберите один способ запуска для экземпляра: Docker Compose ниже или `docker run` в следующем разделе.
+Выберите один способ запуска для экземпляра: Docker Compose ниже или `docker run` в следующем разделе. Оба Compose-файла используют готовый образ `ghcr.io/vrbeeshop/mihomo-prizrak-docker:latest`.
 
 ```bash
 cp .env.example .env
@@ -150,7 +150,7 @@ Standard подходит для начала. gVisor нужен функция�
 
 Цели образа: `linux/amd64`, `linux/arm64`, `linux/arm/v7`, `linux/arm/v5`. MIPS-образа нет. На ARMv5 используется Debian, на остальных архитектурах — Alpine.
 
-Для самостоятельной сборки через Compose задайте `PRIZRAK_IMAGE=mihomo-prizrak-docker:local` и параметры `WITH_GVISOR` / `UPX` в `.env`, затем выполните `docker compose up --build -d`. Для отдельного локального образа:
+Для самостоятельной сборки локального образа задайте `WITH_GVISOR` / `UPX` через build arguments:
 
 ```bash
 docker buildx build --load --platform linux/amd64 \
