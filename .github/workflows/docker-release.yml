@@ -1,193 +1,147 @@
-name: Mihomo Docker Release
+name: Test and release Docker image
 
 on:
-  # Check for a new stable Mihomo release once a day
-  schedule:
-    - cron: "37 11 * * *"
+  push:
+    branches: ['**']
+    tags: ['[0-9]*.[0-9]*.[0-9]*']
+  pull_request:
 
-  # Manual build
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Mihomo release tag (empty = latest)"
-        required: false
-        type: string
-
-permissions: {}
+permissions:
+  contents: read
 
 concurrency:
-  group: mihomo-docker-release
-  cancel-in-progress: false
+  group: docker-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  resolve:
-    name: Resolve Mihomo version
+  version:
+    name: Validate project version
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
-      build: ${{ steps.version.outputs.build }}
+      image: ${{ steps.version.outputs.image }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Resolve release version
+      - name: Read project version and validate release tag
         id: version
         env:
-          MANUAL_VERSION: ${{ inputs.version }}
-          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REPOSITORY: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-
-          if [ -n "$MANUAL_VERSION" ]; then
-            VERSION="${MANUAL_VERSION#refs/tags/}"
-          else
-            RELEASE_JSON=$(curl -fsSL \
-              --retry 3 \
-              --retry-delay 2 \
-              https://api.github.com/repos/MetaCubeX/mihomo/releases/latest)
-
-            VERSION=$(jq -er '.tag_name | select(type == "string" and length > 0)' <<< "$RELEASE_JSON")
-          fi
-
-          if [ -z "$VERSION" ]; then
-            echo "ERROR: Unable to resolve Mihomo release"
+          VERSION=$(cat VERSION)
+          SEMVER='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          if [[ ! "$VERSION" =~ $SEMVER ]]; then
+            echo 'ERROR: VERSION must contain a numeric version such as 0.1.0' >&2
             exit 1
           fi
-
-          PREVIOUS=$(sed -n 's/^mihomo=//p' .github/versions 2>/dev/null || true)
-
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-          if [ "$EVENT_NAME" = "workflow_dispatch" ] || [ "$VERSION" != "$PREVIOUS" ]; then
-            echo "build=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "build=false" >> "$GITHUB_OUTPUT"
+          if [[ "$REF" == refs/tags/* ]]; then
+            TAG="${REF#refs/tags/}"
+            if [[ ! "$TAG" =~ $SEMVER || "$TAG" != "$VERSION" ]]; then
+              echo 'ERROR: Release tag must be numeric and match VERSION' >&2
+              exit 1
+            fi
           fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
-          echo "Current Mihomo release: $VERSION"
-          echo "Previous Mihomo release: ${PREVIOUS:-none}"
-
-  build:
-    name: Build ${{ matrix.variant }}
-    needs: resolve
-    if: needs.resolve.outputs.build == 'true'
+  test:
+    name: Test ${{ matrix.variant }} on amd64
+    needs: version
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
           - variant: standard
-            tag: latest
-            version_suffix: ""
-            with_gvisor: "0"
-            upx: "0"
-          - variant: gvisor
-            tag: gvisor
-            version_suffix: "-gvisor"
-            with_gvisor: "1"
-            upx: "0"
-          - variant: upx
-            tag: upx
-            version_suffix: "-upx"
-            with_gvisor: "0"
-            upx: "1"
-          - variant: upx-gvisor
-            tag: upx-gvisor
-            version_suffix: "-upx-gvisor"
-            with_gvisor: "1"
-            upx: "1"
-
+            with_gvisor: '0'
+            upx: '0'
+          - variant: gvisor-upx
+            with_gvisor: '1'
+            upx: '1'
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Check shell syntax
+        run: |
+          for script in entrypoint.sh scripts/smoke-test.sh; do
+            bash -n "$script"
+          done
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4.4.1
+
+      - name: Build image for tests
+        uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: |
+            APP_VERSION=${{ needs.version.outputs.version }}
+            WITH_GVISOR=${{ matrix.with_gvisor }}
+            UPX=${{ matrix.upx }}
+          load: true
+          push: false
+          tags: prizrak-core:test
+          cache-from: type=gha,scope=test-${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=test-${{ matrix.variant }}
+
+      - name: Test runtime and generated configurations
+        run: bash scripts/smoke-test.sh prizrak-core:test
+
+  publish:
+    name: Publish version and latest to GHCR
+    needs: [version, test]
+    if: github.event_name == 'push' && !github.event.deleted && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4.4.0
+        with:
+          platforms: arm64,arm
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4.4.1
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and publish
-        uses: docker/build-push-action@v6
+      - name: Build and publish multi-platform image
+        uses: docker/build-push-action@v7.4.0
         with:
           context: .
-          file: ./Dockerfile
-          platforms: |
-            linux/amd64
-            linux/arm64
-            linux/arm/v7
-            linux/arm/v5
+          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/arm/v5
           build-args: |
-            MIHOMO_VERSION=${{ needs.resolve.outputs.version }}
-            WITH_GVISOR=${{ matrix.with_gvisor }}
-            UPX=${{ matrix.upx }}
+            APP_VERSION=${{ needs.version.outputs.version }}
+            WITH_GVISOR=0
+            UPX=0
           push: true
           tags: |
-            ghcr.io/wiktorbgu/mihomo-mikrotik:${{ matrix.tag }}
-            ghcr.io/wiktorbgu/mihomo-mikrotik:${{ needs.resolve.outputs.version }}${{ matrix.version_suffix }}
-            docker.io/wiktorbgu/mihomo-mikrotik:${{ matrix.tag }}
-            docker.io/wiktorbgu/mihomo-mikrotik:${{ needs.resolve.outputs.version }}${{ matrix.version_suffix }}
+            ${{ needs.version.outputs.image }}:${{ needs.version.outputs.version }}
+            ${{ needs.version.outputs.image }}:latest
           cache-from: |
-            type=gha,scope=mihomo-standard
-            type=gha,scope=mihomo-gvisor
-            type=gha,scope=mihomo-upx
-            type=gha,scope=mihomo-upx-gvisor
-          cache-to: type=gha,mode=max,scope=mihomo-${{ matrix.variant }}
-
-  save-version:
-    name: Save processed Mihomo version
-    needs: [resolve, build]
-    if: needs.resolve.outputs.build == 'true' && needs.build.result == 'success'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-
-      - name: Update processed version
-        env:
-          VERSION: ${{ needs.resolve.outputs.version }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p .github
-          touch .github/versions
-
-          if grep -q '^mihomo=' .github/versions; then
-            sed -i "s/^mihomo=.*/mihomo=$VERSION/" .github/versions
-          else
-            echo "mihomo=$VERSION" >> .github/versions
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add .github/versions
-
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: update Mihomo version to $VERSION"
-            git push
-          fi
+            type=gha,scope=test-standard
+            type=gha,scope=release
+          cache-to: type=gha,mode=max,scope=release
