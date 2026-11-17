@@ -105,7 +105,7 @@ ARG TARGETARCH
 ARG TARGETVARIANT
 ARG ALPINE_IMAGE
 ARG DEBIAN_IMAGE
-ARG APP_VERSION=0.1.1
+ARG APP_VERSION=0.1.2
 LABEL org.opencontainers.image.title="Prizrak-Core Docker" \
       org.opencontainers.image.source="https://github.com/vrbeeshop/mihomo-prizrak-docker" \
       org.opencontainers.image.version="$APP_VERSION"
