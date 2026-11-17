@@ -4,6 +4,37 @@ set -euo pipefail
 IMAGE="${1:-mihomo-prizrak-docker:local}"
 docker run --rm --network none --cap-drop ALL "$IMAGE" -v
 
+# Routing mode is selected at startup, independently of the network mode.
+for routing_mode in '' global rule direct; do
+  docker run --rm --network none --cap-drop ALL \
+    -e PROXY_MODE="$routing_mode" -e UI_SECRET=smoke-secret \
+    --entrypoint bash "$IMAGE" -euc '
+      /entrypoint.sh >/tmp/mode.log 2>&1 &
+      core_pid=$!
+      trap '\''kill "$core_pid" 2>/dev/null || true'\'' EXIT
+      ready=0
+      for attempt in {1..50}; do
+        if curl -fsS --max-time 1 -H "Authorization: Bearer $UI_SECRET" \
+          http://127.0.0.1:9090/configs >/tmp/mode.json 2>/dev/null; then
+          ready=1; break
+        fi
+        kill -0 "$core_pid" 2>/dev/null || { cat /tmp/mode.log; exit 1; }
+        sleep 0.2
+      done
+      [ "$ready" = 1 ] || { cat /tmp/mode.log; exit 1; }
+      grep -Fq "\"mode\":\"${PROXY_MODE:-rule}\"" /tmp/mode.json
+    '
+done
+
+docker run --rm --network none --cap-drop ALL --entrypoint bash "$IMAGE" -euc '
+  /entrypoint.sh --render-config
+  cp "$WORKDIR/$CONFIG" /tmp/original.yaml
+  if PROXY_MODE=invalid /entrypoint.sh --render-config >/tmp/invalid.log 2>&1; then
+    echo "Invalid PROXY_MODE was accepted" >&2; exit 1
+  fi
+  cmp "$WORKDIR/$CONFIG" /tmp/original.yaml
+'
+
 # Proxy startup must work with no network capabilities, including on a host
 # with several interfaces. Fail if the entrypoint invokes any network tool.
 docker run --rm --network none --cap-drop ALL \

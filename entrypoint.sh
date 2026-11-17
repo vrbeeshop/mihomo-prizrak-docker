@@ -847,6 +847,12 @@ fi
 
 export PROVIDERS_BLOCK PROVIDERS_LIST HWID
 
+# An explicit routing mode overrides the standard template and subscriptions.
+case "${PROXY_MODE:-}" in
+  ''|global|rule|direct) ;;
+  *) fail "PROXY_MODE must be global, rule, or direct" ;;
+esac
+
 # A complete subscription is selected only for the standard configuration.
 # Explicit CONFIG files/templates remain authoritative.
 SUBSCRIPTION_ENABLED=0
@@ -875,6 +881,9 @@ fi
 
 if [ "${ENVSUBST:-1}" = 1 ]; then
   envsubst < "$CONFIG_FILE" > "$RENDERED_CONFIG"
+  if [ "$CONFIG" = default_config.yaml ] && [ -n "${PROXY_MODE:-}" ]; then
+    printf '\nmode: %s\n' "$PROXY_MODE" >> "$RENDERED_CONFIG"
+  fi
 fi
 
 if [ "$SUBSCRIPTION_ENABLED" = 1 ]; then

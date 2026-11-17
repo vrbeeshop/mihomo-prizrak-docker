@@ -102,6 +102,33 @@ func decodedMapping(t *testing.T, data []byte) map[string]any {
 	return mapping
 }
 
+func TestRoutingModeOverride(t *testing.T) {
+	for _, mode := range []string{"", "global", "rule", "direct"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			base := baseConfiguration
+			if mode != "" {
+				base += "\nmode: " + mode + "\n"
+			}
+			result, err := apply([]byte("mode: direct\nrules: [MATCH,DIRECT]\n"), []byte(base))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := mode
+			if want == "" {
+				want = "direct"
+			}
+			if got := decodedMapping(t, result)["mode"]; got != want {
+				t.Fatalf("mode = %v; want %s", got, want)
+			}
+		})
+	}
+	for _, mode := range []string{"invalid", "true", "[]"} {
+		if _, err := apply([]byte("rules: [MATCH,DIRECT]\n"), []byte(baseConfiguration+"\nmode: "+mode+"\n")); err == nil {
+			t.Fatalf("invalid mode %s accepted", mode)
+		}
+	}
+}
+
 func TestApplyPreservesSubscriptionPolicyAndReplacesInfrastructure(t *testing.T) {
 	source := []byte(`
 mode: rule

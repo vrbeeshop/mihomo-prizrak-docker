@@ -49,6 +49,7 @@ write_full() {
   local destination="$1" marker="$2"
   cat > "$destination.new" <<EOF
 mixed-port: 7890
+mode: rule
 port: 7891
 socks-port: 7892
 redir-port: 7893
@@ -150,6 +151,7 @@ stop_server() {
 start_server
 base_url=http://127.0.0.1:18080
 export CONFIG=default_config.yaml NETWORK_MODE=proxy UI_SECRET=subscription-test-secret
+export PROXY_MODE=global
 export HWID=fixture-hwid SUBSCRIPTION_TIMEOUT=1 SUBSCRIPTION_INTERVAL=0
 export PROVIDER_HEADER_SUB1='X-Subscription-Test=fixture-header'
 export SUB1="$base_url/full"
@@ -167,6 +169,7 @@ for unwanted in foreign-secret foreign-ui foreign-listener ':9091' ':9053' 'port
   lacks "$config" "$unwanted"
 done
 has "$config" "secret: $UI_SECRET"
+has "$config" 'mode: global'
 grep -qi '^x-hwid: fixture-hwid$' "$FIXTURE_ROOT/headers"
 grep -qi '^User-Agent: clash.meta$' "$FIXTURE_ROOT/headers"
 grep -qi '^X-Subscription-Test: fixture-header$' "$FIXTURE_ROOT/headers"
@@ -287,8 +290,12 @@ wait_log() {
   fail "The updater did not report $marker"
 }
 wait_rule marker-v1.invalid
+curl -fsS --max-time 2 -H "Authorization: Bearer $UI_SECRET" http://127.0.0.1:9090/configs > "$test_root/mode.json"
+has "$test_root/mode.json" '"mode":"global"'
 write_full "$FIXTURE_ROOT/full.yaml" marker-v2.invalid
 wait_rule marker-v2.invalid
+curl -fsS --max-time 2 -H "Authorization: Bearer $UI_SECRET" http://127.0.0.1:9090/configs > "$test_root/mode.json"
+has "$test_root/mode.json" '"mode":"global"'
 kill -0 "$core_pid"
 cp -- "$WORKDIR/$CONFIG" "$test_root/refreshed-good.yaml"
 

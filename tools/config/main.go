@@ -285,6 +285,14 @@ func apply(source, base []byte) ([]byte, error) {
 		}
 	}
 	root["listeners"] = listeners
+	if mode, exists := runtime["mode"]; exists {
+		switch mode {
+		case "global", "rule", "direct":
+			root["mode"] = mode
+		default:
+			return nil, errors.New("container mode must be global, rule, or direct")
+		}
+	}
 	for _, key := range []string{
 		"external-controller", "external-ui", "external-ui-url", "secret",
 		"find-process-mode", "log-level", "ipv6",
